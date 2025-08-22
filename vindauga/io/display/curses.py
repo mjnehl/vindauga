@@ -6,7 +6,8 @@ Curses display backend.
 import curses
 from typing import Tuple, Dict
 from .base import Display
-from .buffer import DisplayBuffer
+from ..display_buffer import DisplayBuffer
+from ..screen_cell import ScreenCell
 
 
 class CursesDisplay(Display):
@@ -120,19 +121,19 @@ class CursesDisplay(Display):
         if not self.has_colors:
             return 0
         
-        # Map to curses colors
-        fg = self._map_color(fg & 0x0F)
-        bg = self._map_color((bg >> 4) & 0x0F)
+        # Map to curses colors (fg and bg are already color values, not packed attributes)
+        fg_curses = self._map_color(fg)
+        bg_curses = self._map_color(bg)
         
         # Check if pair exists
-        if (fg, bg) in self.color_pairs:
-            return self.color_pairs[(fg, bg)]
+        if (fg_curses, bg_curses) in self.color_pairs:
+            return self.color_pairs[(fg_curses, bg_curses)]
         
         # Create new pair if possible
         if self.next_pair < self.max_pairs:
             try:
-                curses.init_pair(self.next_pair, fg, bg)
-                self.color_pairs[(fg, bg)] = self.next_pair
+                curses.init_pair(self.next_pair, fg_curses, bg_curses)
+                self.color_pairs[(fg_curses, bg_curses)] = self.next_pair
                 pair_num = self.next_pair
                 self.next_pair += 1
                 return pair_num
@@ -155,57 +156,74 @@ class CursesDisplay(Display):
         }
         return color_map.get(color & 0x07, curses.COLOR_WHITE)
     
-    def _get_curses_attr(self, attr: int) -> int:
-        """Convert attribute to curses format."""
+    def _get_curses_attr(self, fg: int, bg: int, attrs: int) -> int:
+        """Convert attributes to curses format."""
         result = 0
         
         # Get color pair
         if self.has_colors:
-            fg = attr & 0x0F
-            bg = (attr >> 4) & 0x0F
             pair = self._get_color_pair(fg, bg)
             if pair > 0:
                 result |= curses.color_pair(pair)
         
-        # Handle bold/bright
-        if attr & 0x80:
+        # Handle text attributes
+        if attrs & ScreenCell.ATTR_BOLD:
             result |= curses.A_BOLD
+        if attrs & ScreenCell.ATTR_UNDERLINE:
+            result |= curses.A_UNDERLINE
+        if attrs & ScreenCell.ATTR_REVERSE:
+            result |= curses.A_REVERSE
         
         return result
     
     def flush_buffer(self, buffer: DisplayBuffer) -> None:
-        """Flush buffer to screen."""
+        """Flush buffer to screen using curses."""
         if not self._initialized or not self.stdscr:
             return
         
-        for row in buffer.get_damaged_rows():
-            damage = buffer.get_damage(row)
-            if not damage:
+        # Process each damaged row
+        for row_idx, damage in buffer.get_damaged_regions():
+            if not damage.is_dirty:
                 continue
             
-            start, end = damage
+            bounds = damage.get_bounds()
+            if bounds is None:
+                continue
             
-            # Output cells
+            start, end = bounds
+            
+            # Output cells in damaged region
             for col in range(start, end):
-                cell = buffer.get_cell(col, row)
+                cell = buffer.get_cell(col, row_idx)
                 if not cell:
+                    # Clear cell
+                    try:
+                        self.stdscr.addstr(row_idx, col, ' ')
+                    except curses.error:
+                        pass
                     continue
                 
                 # Get curses attributes
-                attr = self._get_curses_attr(cell.attr)
+                attr = self._get_curses_attr(cell.fg_color, cell.bg_color, cell.attrs)
                 
-                # Output text
+                # Output character
                 try:
-                    if cell.text and not cell.is_trail():
-                        self.stdscr.addstr(row, col, cell.text, attr)
-                    elif not cell.is_trail():
-                        self.stdscr.addstr(row, col, ' ', attr)
+                    # Skip wide character trailing cells
+                    if cell.is_wide and col + 1 < end:
+                        # Wide character - curses handles this automatically
+                        self.stdscr.addstr(row_idx, col, cell.char, attr)
+                    elif not cell.is_wide:
+                        # Normal character
+                        self.stdscr.addstr(row_idx, col, cell.char, attr)
                 except curses.error:
                     # Ignore errors at screen edges
                     pass
         
+        # Refresh screen
         self.stdscr.refresh()
-        buffer.commit_flush()
+        
+        # Clear damage tracking
+        buffer.clear_damage()
     
     def set_cursor_position(self, x: int, y: int) -> None:
         """Set cursor position."""

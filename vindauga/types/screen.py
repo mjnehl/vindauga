@@ -93,11 +93,25 @@ class Screen:
     screen = None
 
     @classmethod
-    def init(cls):
+    def init(cls, use_new_io=False, io_backend='auto', io_features=None):
+        """
+        Initialize the Screen singleton.
+        
+        Args:
+            use_new_io: If True, use the new I/O system. If False, use legacy curses.
+            io_backend: Backend for new I/O ('auto', 'ansi', 'termio', 'curses')
+            io_features: Dict of feature flags for new I/O system
+        """
         if not Screen.screen:
-            Screen.screen = cls()
+            Screen.screen = cls(use_new_io=use_new_io, io_backend=io_backend, io_features=io_features)
 
-    def __init__(self):
+    def __init__(self, use_new_io=False, io_backend='auto', io_features=None):
+        # Store configuration
+        self.use_new_io = use_new_io
+        self.io_backend = io_backend
+        self.io_features = io_features or {}
+        
+        # Initialize common attributes
         self.msWhere = Point(0, 0)
         self.doRepaint = 0
         self.doResize = 0
@@ -117,15 +131,21 @@ class Screen:
 
         self.evIn = None
         self.evOut = None
-        kbEscTimer.start(1)
-        kbEscTimer.stop()
-        msAutoTimer.start(1)
-        msAutoTimer.stop()
-        self.msOldButtons = self.msWhere.x = self.msWhere.y = 0
-        wakeupTimer.start(DELAY_WAKEUP)
-        self.stdscr = self.initialiseScreen()
-        self._setScreenSize()
-        self.__rawMode = False
+        
+        # Initialize new I/O system if requested
+        if self.use_new_io:
+            self._init_new_io()
+        else:
+            # Use legacy curses initialization
+            kbEscTimer.start(1)
+            kbEscTimer.stop()
+            msAutoTimer.start(1)
+            msAutoTimer.stop()
+            self.msOldButtons = self.msWhere.x = self.msWhere.y = 0
+            wakeupTimer.start(DELAY_WAKEUP)
+            self.stdscr = self.initialiseScreen()
+            self._setScreenSize()
+            self.__rawMode = False
 
         if not PLATFORM_IS_WINDOWS:
             signals = (SIGCONT,
@@ -148,6 +168,37 @@ class Screen:
 
         self.selectPalette()
         self.lockRefresh = 0
+    
+    def _init_new_io(self):
+        """Initialize the new I/O system."""
+        from vindauga.io.adapters import ScreenAdapter, EventAdapter
+        
+        # Create screen adapter
+        self.screen_adapter = ScreenAdapter(
+            io_backend=self.io_backend,
+            io_features=self.io_features
+        )
+        
+        # Create event adapter
+        self.event_adapter = EventAdapter()
+        
+        # Get display and input from adapter
+        self.display = self.screen_adapter.display
+        self.input_handler = self.screen_adapter.input_handler
+        
+        # Set screen dimensions
+        self.screenWidth, self.screenHeight = self.screen_adapter.get_size()
+        
+        # Initialize timers (still needed for new I/O)
+        kbEscTimer.start(1)
+        kbEscTimer.stop()
+        msAutoTimer.start(1)
+        msAutoTimer.stop()
+        wakeupTimer.start(DELAY_WAKEUP)
+        
+        # No curses stdscr in new I/O mode
+        self.stdscr = None
+        self.__rawMode = True  # New I/O handles raw mode internally
         self.__draw_lock = threading.Lock()
 
     @staticmethod
@@ -200,7 +251,12 @@ class Screen:
         curses.curs_set(1)
 
     def refresh(self):
-        self.stdscr.refresh()
+        if self.use_new_io:
+            # New I/O system handles refresh internally
+            if hasattr(self, 'screen_adapter'):
+                self.screen_adapter.refresh()
+        else:
+            self.stdscr.refresh()
 
     # noinspection PyUnresolvedReferences
     def initialiseScreen(self):
@@ -220,12 +276,18 @@ class Screen:
         return stdscr
 
     def shutdown(self):
-        sys.stderr = sys.__stderr__
-        self.stdscr.nodelay(False)
-        self.stdscr.keypad(False)
-        curses.echo()
-        curses.nocbreak()
-        curses.endwin()
+        if self.use_new_io:
+            # Shutdown new I/O system
+            if hasattr(self, 'screen_adapter'):
+                self.screen_adapter.shutdown()
+        else:
+            # Shutdown curses
+            sys.stderr = sys.__stderr__
+            self.stdscr.nodelay(False)
+            self.stdscr.keypad(False)
+            curses.echo()
+            curses.nocbreak()
+            curses.endwin()
 
     def setScreenSize(self, width: int, height: int):
         if PLATFORM_IS_WINDOWS:
@@ -389,10 +451,17 @@ class Screen:
             event.what = evCommand
         elif self.doResize > 0:
             self.doResize = 0
-            # If there was a SIGWINCH, this will redraw based on the window size
-            curses.endwin()
-            self.stdscr.refresh()
-            self._setScreenSize()
+            if self.use_new_io:
+                # Handle resize with new I/O system
+                if hasattr(self, 'screen_adapter'):
+                    width, height = self.screen_adapter.get_size()
+                    self.screenWidth = width
+                    self.screenHeight = height
+            else:
+                # If there was a SIGWINCH, this will redraw based on the window size
+                curses.endwin()
+                self.stdscr.refresh()
+                self._setScreenSize()
             event.message.command = cmSysResize
             event.what = evCommand
         elif not Screen.evQueue.empty():
@@ -408,7 +477,10 @@ class Screen:
             event.message.command = cmSysWakeup
             event.what = evCommand
         else:
-            self.__handleIO_Events(event)
+            if self.use_new_io:
+                self.__handleIO_Events_new(event)
+            else:
+                self.__handleIO_Events(event)
 
     def makeBeep(self):
         curses.beep()
@@ -473,6 +545,12 @@ class Screen:
         stdscr.refresh()
 
     def writeRow(self, x: int, y: int, src, rowLen: int):
+        if self.use_new_io:
+            # Use new I/O system to write row
+            if hasattr(self, 'screen_adapter'):
+                self.screen_adapter.write_row(x, y, src, rowLen)
+            return
+            
         if self.__rawMode: # and self.screenMode == Display.smCO256:
             return self.writeRowRaw(x, y, src, rowLen)
 
@@ -527,6 +605,20 @@ class Screen:
     def _setScreenSize(self):
         self.screenHeight, self.screenWidth = self.stdscr.getmaxyx()
         self.screenBuffer = BufferArray([0] * (self.screenWidth * self.screenHeight))
+
+    def __handleIO_Events_new(self, event: Event):
+        """Handle I/O events using the new I/O system."""
+        if not hasattr(self, 'input_handler'):
+            return
+        
+        # Get event from new I/O system with a short timeout
+        new_event = self.input_handler.get_event(0.01)  # 10ms timeout
+        
+        if new_event:
+            # Translate to Vindauga event format
+            translated = self.event_adapter.translate_to_vindauga(new_event)
+            if translated:
+                event.setFrom(translated)
 
     def __handleIO_Events(self, event: Event):
         fdActualRead = self.fdSetRead

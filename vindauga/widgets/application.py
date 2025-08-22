@@ -32,8 +32,16 @@ class Application(Program):
 
     name = 'Application'
 
-    def __init__(self):
-        Screen.init()
+    def __init__(self, use_new_io=False, io_backend='auto', io_features=None):
+        """
+        Initialize the Application.
+        
+        Args:
+            use_new_io: If True, use the new I/O system. If False, use legacy curses.
+            io_backend: Backend for new I/O ('auto', 'ansi', 'termio', 'curses')
+            io_features: Dict of feature flags for new I/O system
+        """
+        Screen.init(use_new_io=use_new_io, io_backend=io_backend, io_features=io_features)
         vindauga.types.screen.Screen = Screen.screen
         super().__init__()
         Program.application = self

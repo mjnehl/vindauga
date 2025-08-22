@@ -17,37 +17,61 @@ class DrawBuffer:
     A buffer into which the widgets draw themselves.
 
     Uses `array` objects to represent the buffer with the colors and attributes set.
+    Can optionally use the new I/O system's DisplayBuffer for better performance.
     """
-    __slots__ = ('_data',)
+    __slots__ = ('_data', '_use_new_io', '_buffer_adapter')
 
     CHAR_WIDTH = 16
     ATTRIBUTE_MASK = 0xFF0000
     CHAR_MASK = 0xFFFF
 
-    def __init__(self, filled: bool = False):
-        if not filled:
-            self._data = BufferArray()
-        else:
-            self._data = BufferArray([ord('\x00')] * LINE_WIDTH)
+    def __init__(self, filled: bool = False, use_new_io: bool = False):
+        self._use_new_io = use_new_io
+        self._buffer_adapter = None
+        
+        if self._use_new_io:
+            # Try to use new I/O system's buffer adapter
+            try:
+                from vindauga.io.adapters import BufferAdapter
+                self._buffer_adapter = BufferAdapter(LINE_WIDTH, 1)  # Single row buffer
+                if filled:
+                    self._buffer_adapter.clear()
+            except ImportError:
+                # Fall back to legacy if new I/O not available
+                self._use_new_io = False
+                logger.warning("New I/O system not available, falling back to legacy buffer")
+        
+        if not self._use_new_io:
+            # Use legacy buffer
+            if not filled:
+                self._data = BufferArray()
+            else:
+                self._data = BufferArray([ord('\x00')] * LINE_WIDTH)
 
     def moveBuf(self, indent: int, source, attr: int, count: int):
-        if not attr:
-            attrs = (c & self.ATTRIBUTE_MASK for c in self._data[indent:indent + count])
-            self._data[indent:indent + count] = BufferArray(ord(c) | a for c, a in zip(source[:count], attrs))
+        if self._use_new_io and self._buffer_adapter:
+            self._buffer_adapter.move_buf(indent, source, attr, count)
         else:
-            attr = (attr & 0xFF) << self.CHAR_WIDTH
-            self._data[indent: indent + count] = BufferArray((ord(c) | attr for c in source[:count]))
+            if not attr:
+                attrs = (c & self.ATTRIBUTE_MASK for c in self._data[indent:indent + count])
+                self._data[indent:indent + count] = BufferArray(ord(c) | a for c, a in zip(source[:count], attrs))
+            else:
+                attr = (attr & 0xFF) << self.CHAR_WIDTH
+                self._data[indent: indent + count] = BufferArray((ord(c) | attr for c in source[:count]))
 
     def moveChar(self, indent: int, c, attr: int, count: int):
-        if attr and c:
-            attr = (attr & 0xFF) << self.CHAR_WIDTH
-            self._data[indent: indent + count] = BufferArray([ord(c) | attr] * count)
-        elif attr:
-            attr = (attr & 0xFF) << self.CHAR_WIDTH
-            for i in range(indent, indent + count):
-                self._data[i] = (self._data[i] & self.CHAR_MASK) | attr
+        if self._use_new_io and self._buffer_adapter:
+            self._buffer_adapter.move_char(indent, c, attr, count)
         else:
-            self._data[indent: indent + count] = BufferArray([ord(c)] * count)
+            if attr and c:
+                attr = (attr & 0xFF) << self.CHAR_WIDTH
+                self._data[indent: indent + count] = BufferArray([ord(c) | attr] * count)
+            elif attr:
+                attr = (attr & 0xFF) << self.CHAR_WIDTH
+                for i in range(indent, indent + count):
+                    self._data[i] = (self._data[i] & self.CHAR_MASK) | attr
+            else:
+                self._data[indent: indent + count] = BufferArray([ord(c)] * count)
 
     def moveStr(self, indent: int, text: str, attr: int):
         if isinstance(attr, str):
@@ -91,6 +115,8 @@ class DrawBuffer:
         self._data[indent: indent + count] = BufferArray(source[:count])
 
     def __getitem__(self, *args):
+        if self._use_new_io and self._buffer_adapter:
+            return self._buffer_adapter.__getitem__(*args)
         return self._data.__getitem__(*args)
 
     def __setitem__(self, *args):

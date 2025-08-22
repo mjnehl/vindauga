@@ -10,9 +10,9 @@ import os
 from io import StringIO
 
 from vindauga.io.display.ansi import ANSIDisplay
-from vindauga.io.input.ansi import ANSIInput
-from vindauga.io.input.ansi_parser import ANSIEscapeParser, ParsedKey, ParsedMouse, ParserState
-from vindauga.io.display.buffer import DisplayBuffer, ScreenCell
+from vindauga.io.input.ansi import ANSIInput, ANSIEscapeParser, ParsedKey, ParsedMouse, ParserState
+from vindauga.io.display_buffer import DisplayBuffer
+from vindauga.io.screen_cell import ScreenCell
 from vindauga.events.event import Event
 from vindauga.constants.event_codes import evKeyDown, evMouseDown, evMouseUp, evMouseMove
 from vindauga.constants import keys as Keys
